@@ -1,0 +1,1273 @@
+```{r}
+library(dada2); packageVersion("dada2")
+library(phyloseq); packageVersion("phyloseq")
+library(Biostrings); packageVersion("Biostrings")
+library(decontam); packageVersion("decontam")
+library(ggsignif); packageVersion("ggsignif")
+library(microbiome); packageVersion("microbiome")
+library(plyr); packageVersion("plyr")
+library(speedyseq); packageVersion('speedyseq')
+library(decontam); packageVersion("decontam")
+library(ggplot2); packageVersion("ggplot2")
+library(pheatmap); packageVersion("pheatmap")
+library(viridis); packageVersion("viridis")
+library(Hmisc); packageVersion("Hmisc")
+library(microbiomeutilities); packageVersion("microbiomeutilities")
+library(vegan); packageVersion("vegan")
+library(DirichletMultinomial); packageVersion("DirichletMultinomial")
+library(factoextra); packageVersion("factoextra")
+library(xtable); packageVersion("xtable")
+library(parallel); packageVersion("parallel")
+library("DESeq2"); packageVersion("DESeq2")
+library('lulu'); packageVersion("lulu")
+
+taxa_name_func <- function(x) {paste0(x['ASV'], '__',x['Family'],  '.g__' , gsub('/', '', gsub("-", "", x['Genus'])),'__', x['Species'])}
+
+prepare_count_table <- function (ps_obj, taxa_name_func) {
+  otu_matrix <- as(otu_table(ps_obj), 'matrix')
+  taxa_matrix <- as(tax_table(ps_obj), 'matrix')
+  taxa_matrix <- cbind(ASV=rownames(taxa_matrix), taxa_matrix)  
+  taxa_matrix_good_names <- apply(taxa_matrix, MARGIN=1, taxa_name_func)
+  # ps_meta <- as(sample_data(ps_obj), 'matrix')
+  colnames(otu_matrix) <- taxa_matrix_good_names
+  return(otu_matrix)
+}
+
+```
+```{r}
+path <- "/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/processed_data/cutadapt_out/"
+fnFs <- sort(list.files(path, pattern="_L001_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_L001_R2_001.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, 
+                     truncLen=c(150,150),
+                     maxN=0, 
+                     maxEE=c(2,3),
+                     truncQ=2,
+                     compress=TRUE, multithread=TRUE)
+filtFs <- filtFs[file.exists(filtFs)]
+filtRs <- filtRs[file.exists(filtRs)]
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+mergers <- mergePairs(dadaFs, 
+                      filtFs, 
+                      dadaRs, 
+                      filtRs,
+                      justConcatenate=TRUE,
+                      verbose=TRUE)
+seqtab <- makeSequenceTable(mergers)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+```{r}
+write.table(seqtab.nochim, file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/seqtab.tsv', quote=FALSE, sep='\t')
+
+```
+
+```{r}
+seqtab <- read.csv("/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/seqtab_reformat.tsv", sep='\t', row.names='X')
+seqtab[is.na(seqtab)]=0
+taxtable <- read.csv("/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/taxtable_reformat.tsv", sep='\t', row.names='X')
+taxtable[is.na(taxtable)]=0
+samples_df <- read.csv("/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/to_dada2_data/sample_info.tsv", sep='\t', row.names='Sample')
+tree <- phy_tree(ape::read.tree('/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/tax_calling_after_lulu/all_consensus.newick'))
+seqtab_cleared <- seqtab
+  
+OTU = otu_table(as.matrix(seqtab_cleared), taxa_are_rows=FALSE)
+TAX = tax_table(as.matrix(taxtable), errorIfNULL = TRUE)
+samples_df <- samples_df[c(row.names(OTU)), ]
+samples_df['ASV.counts'] <- c(rowSums(OTU))
+samples = sample_data(samples_df)
+
+ps <- phyloseq(OTU, tree, TAX, samples)
+saveRDS(ps, '/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/ps.rds')
+ps
+
+```
+```{r}
+df <- as.data.frame(sample_data(ps)) # Put sample_data into a ggplot-friendly data.frame
+df$LibrarySize <- sample_sums(ps)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize)) + geom_point()
+contamdf.freq <- isContaminant(ps, method="frequency", conc="Concentration")
+#head(contamdf.freq)
+table(contamdf.freq$contaminant)
+sample_data(ps)$is.neg <- sample_data(ps)$Infection.status == "Negative control"
+contamdf.prev <- isContaminant(ps, method="prevalence", neg="is.neg", threshold=0.5)
+table(contamdf.prev$contaminant)
+ps.noncontam <- prune_taxa(!contamdf.freq$contaminant + contamdf.prev$contaminant, ps)
+rowuse <- rownames(otu_table(ps.noncontam)[rowSums(otu_table(ps.noncontam)) > 100,])
+ps.noncontam <- prune_samples(rowuse, ps.noncontam)
+#ps.noncontam <- prune_samples(sample_sums(ps.noncontam)>=1, ps.noncontam)
+
+ps.noncontam <- prune_taxa(taxa_sums(ps.noncontam)> 0, ps.noncontam)
+
+
+write.table(otu_table(ps.noncontam), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/nocontam_otu_table.tsv', quote=FALSE, sep='\t')
+
+
+```
+```{r}
+matchlist_name <- read.table("/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/tax_calling_after_lulu//match_list.txt", header=FALSE,as.is=TRUE, stringsAsFactors=FALSE)
+seqtab <- read.csv("/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/nocontam_otu_table.tsv",sep='\t',header=TRUE,as.is=TRUE, row.names = 1)
+seqtab <- as.data.frame(t(seqtab))
+curated_result <- lulu(seqtab, matchlist_name)
+seqtab_cleared <- t(curated_result$curated_table)
+
+OTU = otu_table(as.matrix(seqtab_cleared), taxa_are_rows=FALSE)
+TAX = tax_table(as.matrix(taxtable), errorIfNULL = TRUE)
+samples_df <- samples_df[c(row.names(OTU)), ]
+ps.noncontam <- phyloseq(OTU, tree, TAX, samples)
+
+write.table(otu_table(ps.noncontam), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/nocontam_otu_table.tsv', quote=FALSE, sep='\t')
+write.table(tax_table(ps.noncontam), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//tax_table_decode.tsv', quote=FALSE, sep='\t')
+```
+```{r}
+ps_obj <- ps.noncontam
+
+tax_glom_level <- 'Species'
+
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+write.table(otu_table(ps_obj), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08/nocontam_otu_table_spec_level.tsv', quote=FALSE, sep='\t')
+write.table(tax_table(ps_obj), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//tax_table_decode_spec_level.tsv', quote=FALSE, sep='\t')
+
+```
+
+#DMM CLUSTERING
+```{r}
+ps_obj <- ps.noncontam
+
+#tip_glom_level <- 0.05
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+#tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+#if (tax_glom_level != 'ASV'){
+#ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)}
+#tax_glom_level <- 'Genus'
+#tax_glom_level <- 'Genus'
+#if (tax_glom_level != 'ASV'){
+#  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+#}
+count <- otu_table(otu_table(ps_obj))
+#cnts <- log10(colSums(otu_table(ps)))
+
+#densityplot(cnts, xlim=range(cnts),+ xlab="Taxon representation (log 10 count)")
+
+fit <- mclapply(1:5, dmn, count=count, verbose=TRUE)
+
+lplc <- sapply(fit, laplace)
+bic <- sapply(fit, BIC)
+aic <- sapply(fit, AIC)
+
+```
+
+
+```{r}
+p <- ggplot() + 
+      geom_point(aes(y=lplc, x=1:5), color='#337357',size=2) + 
+      geom_point(aes(y=bic, x=1:5), color="#EE4266",size=2) + 
+      geom_point(aes(y=aic, x=1:5), color="#FFD23F",size=2) + 
+      geom_line(aes(y=lplc, x=1:5, color='Laplace'),size=0.8)+ 
+      geom_line(aes(y=bic, x=1:5, color="BIC"),size=0.8)+ 
+      geom_line(aes(y=aic, x=1:5, color="AIC"),size=0.8) +
+      scale_color_manual(name = "Mesure", values = c("Laplace" = "#337357", "BIC" = "#EE4266", 'AIC' = '#FFD23F')) +
+      theme_bw()+ theme(aspect.ratio = 1/1.2)+
+      xlab("Number of Dirichlet Components")+
+      ylab("Mesure")+
+      theme(text = element_text(size = 14)) +
+      ggtitle("Dirichlet Multinomial Mixtures")+
+      theme(plot.title = element_text(hjust = 0.5))
+#plot(lplc, type="b", xlab="Number of Dirichlet Components", ylab="Model Fit")
+#plot(bic, type="b", xlab="Number of Dirichlet Components", ylab="Model Fit")
+#plot(aic, type="b", xlab="Number of Dirichlet Components", ylab="Model Fit")
+p
+ggsave('VIZ_NEW//DMM.pdf')
+ggsave('VIZ_NEW//DMM.png', dpi=800)
+```
+```{r}
+library("DESeq2"); packageVersion("DESeq2")
+
+ps_obj <- subset_samples(ps.noncontam, Time.point != "Negative control")
+
+prevalence <- 1/100
+prevalence*100
+detection <- 1
+#taxas <- core_members(ps_obj, detection = detection, prevalence = prevalence)
+
+tax_glom_level <- 'Species'
+tax_glom_level <- 'ASV'
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+#tip_glom_level <- 0.1
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+
+
+ps_obj <- subset_samples(ps_obj, Time.point != "Healthy")
+write.table(otu_table(ps_obj), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//otu_table_species_level.tsv', quote=FALSE, sep='\t')
+
+otu_table(ps_obj) <- otu_table(ps_obj)# + 1
+
+
+agesstat = phyloseq_to_deseq2(ps_obj, ~ Time.point)
+# calculate geometric means prior to estimate size factors
+#gm_mean = function(x, na.rm=TRUE){
+#  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+#}
+#geoMeans = apply(counts(agesstat), 1, gm_mean)
+#agesstat = estimateSizeFactors(agesstat, geoMeans = geoMeans)
+agesstat = DESeq(agesstat, fitType="local", test="Wald", sfType = 'poscounts')
+
+
+res = results(agesstat, independentFiltering = F, contrast=c("Time.point","Infected (2 point)", "Infected (1 point)"))
+
+res = res[order(res$padj, na.last=NA), ]
+alpha = 0.05
+sigtab = res[(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(ps.noncontam)[rownames(sigtab), ], "matrix"))
+head(sigtab)
+theme_set(theme_bw())
+
+# Phylum order
+sorted_sigtaben <- sigtab[order(sigtab$log2FoldChange),]
+df <- data.frame(Species = row.names(sorted_sigtaben), log2FoldChange = sorted_sigtaben$log2FoldChange, pvalue = sorted_sigtaben$pvalue)
+
+df$pvalue <- makeStars(df$pvalue)
+df$Satus <- df$log2FoldChange
+df[df$Satus > 0, ]$Satus <- '2 point'
+df[df$Satus < 0, ]$Satus <- '1 point'
+
+labels <- c()
+
+for (i in df$Species){
+  labels <- append(labels, paste(i, tax_table(ps.noncontam)[i, "Species"]))
+}
+
+df$Species <- labels
+
+ggplot(data=df, aes(y=reorder(Species, log2FoldChange), x=log2FoldChange, fill = Satus)) +
+      #geom_bar(stat="identity")  + 
+      coord_fixed(ratio=2
+                ) + 
+      theme(text = element_text(size = 5)) +
+      geom_col(width = 0.7, position = position_dodge(0.8),color='black' , color='black', size=.5) +
+      geom_text(aes(label = pvalue), vjust = .6, position = position_dodge(1), size = 2.5) +  
+      ylab("Species") + theme_bw()
+
+ggsave('VIZ_NEW/DeSeq2_TPs_ASV.pdf')
+ggsave('VIZ_NEW/DeSeq2_TPs_ASV.png', dpi=800)
+```
+
+
+```{r}
+library("ggrepel"); packageVersion("ggrepel")
+
+sigtab = cbind(as(res, "data.frame"), as(tax_table(ps.noncontam)[rownames(res), ], "matrix"))
+head(sigtab)
+
+
+
+res_tableOE_tb <- sigtab %>% 
+                  mutate(threshold_OE = padj < 0.05 & abs(log2FoldChange) >= 0.5)
+
+axis_names <- res_tableOE_tb[, 'Species']
+
+
+if (tax_glom_level == 'ASV'){
+    axis_names <- c()
+    for (i in row.names(res_tableOE_tb)) {
+    
+    name <- paste(i, TAX[i, 'Genus'], TAX[i, 'Species'], sep='_')
+    axis_names <- append(axis_names, name)
+  }
+}
+axis_names
+
+ggplot(res_tableOE_tb, aes(y=-log10(pvalue), x=log2FoldChange))  +
+        geom_point(aes(colour = threshold_OE), size=3)+
+        geom_point(aes(colour = threshold_OE), size=3.2, color='black', shape =1)+  
+  geom_text_repel(aes(label = axis_names), size = 1.2) +
+  ggtitle("Volcano plot") +
+  xlab("log2 fold change") + 
+  ylab("-log10 adjusted p-value") +
+  theme(legend.position = "none",
+  plot.title = element_text(size = 10),
+  axis.title = element_text(size = 10))  + 
+  coord_fixed(ratio=1/2) + theme_bw()+ theme(text = element_text(size = 10))
+#ggsave(paste('VIZ/DeSeq2_Volcano', tax_glom_level, '.pdf', sep = '_'))
+```
+```{r}
+write.table(res_tableOE_tb, file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//res_tableOE_tb_mapped_new.tsv', quote=FALSE, sep='\t')
+#write.table(DataFrame(sam_data(ps.mcov)), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//mcov_meta.tsv', quote=FALSE, sep='\t')
+```
+# Permanova
+```{r}
+bacteriome <- readRDS('ps_MCOV_meta.rds')
+
+first_point_subset <- c()
+second_point_subset <- c()
+
+subset_mcov <- row.names(otu_table(ps.noncontam))[grepl('MCOV', row.names(otu_table(ps.noncontam)))]
+subset_mcov_f1 <- subset_mcov[grepl('F1', subset_mcov)]
+
+for (i in subset_mcov_f1){
+  
+  
+  if (paste(substr(i,0,10), '2', sep='') %in% subset_mcov){
+
+        first_point_subset <- append(first_point_subset, i)
+        second_point_subset <- append(second_point_subset, paste(substr(i,0,10), '2', sep=''))
+  }
+}
+    
+subset_mcov <- c(first_point_subset, second_point_subset)
+ps.mcovsubset <- prune_samples(subset_mcov, ps.noncontam)
+
+sample_data_bacteriome <- sample_data(bacteriome)
+sample_names <- c()
+
+for (i in row.names(sample_data_bacteriome)){
+  sample_names <- append(sample_names, gsub('_', '-', strsplit(i, '_BHQ1')))
+  }
+  
+
+row.names(sample_data_bacteriome) <- c(sample_names)
+sample_data_mcov <- sample_data_bacteriome[rownames(otu_table(ps.mcovsubset))]
+#sample_data_mcov['Infection.status'] <- sample_data(ps.mcovsubset)['Infection.status']
+#sample_data_mcov <- subset(sample_data_mcov, select = -'Concentrarion')
+sample_data_mcov['Concentration'] <- sample_data(ps.mcovsubset)$Concentration
+#sample_data_mcov['Time.point'] <- sample_data(ps.mcovsubset)['Time.point']
+ps.mcov <- phyloseq(otu_table(ps.mcovsubset), tree, tax_table(ps.mcovsubset), sample_data(sample_data_mcov))
+write.table(DataFrame(sample_data(ps.mcov)), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//mcov_meta.tsv', quote=FALSE, sep='\t')
+
+```
+```{r}
+
+mcov_meta <- read.csv("/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//mcov_meta_new.tsv", sep='\t', row.names='X')
+ps.mcov <- phyloseq(otu_table(ps.noncontam), tree, tax_table(ps.noncontam), sample_data(mcov_meta))
+
+
+```
+
+```{r}
+#library(vegan)
+library('vegan'); packageVersion("vegan")
+
+ps_obj <- ps.mcov
+#ps_obj <- subset_samples(ps_obj, time_point != 2)
+
+
+#rowuse <- rownames(otu_table(ps_obj)[rowSums(otu_table(ps_obj)) > 100,])
+#ps_obj <- prune_samples(rowuse, ps_obj)
+#ps.noncontam <- prune_samples(sample_sums(ps.noncontam)>=1, ps.noncontam)
+#ps_obj <- prune_taxa(taxa_sums(ps_obj)> 0, ps_obj)
+
+
+prevalence <- 1/100
+prevalence*100
+detection <- 1
+#taxas <- core_members(ps_obj, detection = detection, prevalence = prevalence)
+#ps_obj <- prune_taxa(taxas, ps_obj)
+#tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+#if (tax_glom_level != 'ASV'){
+#  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+#}
+tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+transformation <- 'clr'
+#transformation <- 'compositional'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+#ps_obj <- microbiome::transform(ps_obj, "compositional")
+library(picante); packageVersion("picante")
+dist = phyloseq::distance(ps_obj, method="euclidean", parallel=100)
+#dist = picante::unifrac(as(t(otu_table(ps_obj)), "matrix"), phy_tree(ps_obj))
+
+metadf <- data.frame(sample_data(ps_obj))
+
+
+permanova_full <- adonis2(dist ~ 
+                          CT+
+                          who1+
+                          severe_status+
+                          Inflammatory.diseases.of.the.bowel+
+                          Arterial.hypertension+
+                          time_point+
+                          antibiotics+
+                          antibiotics.before.hospitalization+
+                          Current.smoking+#*Past.smoking+
+                          sex+
+                          age_group+
+                          Diabetes+
+                          Obesity+
+                          Coronary.heart.disease+
+                          Taking.glucocorticoids.biological.therapy+
+                          Proton_pump_inhibitors
+                         ,data = metadf, permutations = 999, parallel=60)
+
+
+# permanova_full <- adonis2(dist ~ specimen_type ,data = metadf, parallel=32)
+res <- as.data.frame(permanova_full)
+permanova_full
+```
+```{r}
+write.table(res, file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/mapping_aproach/PERMANOVA.tsv', quote=FALSE, sep='\t')
+
+
+```
+```{r}
+#library(vegan)
+library('vegan'); packageVersion("vegan")
+
+ps_obj <- ps.mcov
+#ps_obj <- subset_samples(ps_obj, time_point != 2)
+
+
+#rowuse <- rownames(otu_table(ps_obj)[rowSums(otu_table(ps_obj)) > 100,])
+#ps_obj <- prune_samples(rowuse, ps_obj)
+#ps.noncontam <- prune_samples(sample_sums(ps.noncontam)>=1, ps.noncontam)
+#ps_obj <- prune_taxa(taxa_sums(ps_obj)> 0, ps_obj)
+
+
+prevalence <- 1/100
+prevalence*100
+detection <- 1
+#taxas <- core_members(ps_obj, detection = detection, prevalence = prevalence)
+#ps_obj <- prune_taxa(taxas, ps_obj)
+tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+transformation <- 'clr'
+#transformation <- 'compositional'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+#ps_obj <- microbiome::transform(ps_obj, "compositional")
+library(picante); packageVersion("picante")
+dist = phyloseq::distance(ps_obj, method="euclidean", parallel=100)
+#dist = picante::unifrac(as(t(otu_table(ps_obj)), "matrix"), phy_tree(ps_obj))
+
+metadf <- data.frame(sample_data(ps_obj))
+
+
+permanova_full <- adonis2(dist ~ 
+                          CT+
+                          who1+
+                          severe_status+
+                          Inflammatory.diseases.of.the.bowel+
+                          Arterial.hypertension+
+                          time_point+
+                          antibiotics+
+                          antibiotics.before.hospitalization+
+                          Current.smoking+#*Past.smoking+
+                          sex+
+                          age_group+
+                          Diabetes+
+                          Obesity+
+                          Coronary.heart.disease+
+                          Taking.glucocorticoids.biological.therapy+
+                          Proton_pump_inhibitors
+                         ,data = metadf, permutations = 999, parallel=60)
+
+
+# permanova_full <- adonis2(dist ~ specimen_type ,data = metadf, parallel=32)
+res <- as.data.frame(permanova_full)
+permanova_full
+```
+# PERMDISP
+```{r}
+library(vegan)
+
+ps_obj <- ps.mcov
+tax_glom_level <- 'ASV'
+#tax_glom_level <- 'Genus'
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+
+transformation <- 'clr'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+dist = phyloseq::distance(ps_obj, method="euclidean", parallel=100)
+
+metadf <- data.frame(sample_data(ps_obj))
+#groups <- factor(c(c(metadf$antibiotics), c(metadf$antibiotics.before.hospitalization)))
+groups <- c('CT', 'who1', 'severe_status', 'Inflammatory.diseases.of.the.bowel', 'Coronary.heart.disease', 'Arterial.hypertension', 'time_point', 'antibiotics', 'antibiotics.before.hospitalization', 'Current.smoking', 'Past.smoking', 'sex', 'age_group', 'Diabetes', 'Obesity', 'Taking.glucocorticoids.biological.therapy', 'Proton_pump_inhibitors')
+for (i in groups){
+  
+  mod <- betadisper(dist, metadf[, i])  
+  permres <- permutest(mod, pairwise = TRUE, permutations = 999)
+  print(i)
+  print(permres)
+}
+#mod 
+#anova(mod)
+```
+```{r}
+library(vegan)
+
+ps_obj <- ps.mcov
+tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+
+transformation <- 'clr'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+dist = phyloseq::distance(ps_obj, method="euclidean", parallel=100)
+
+metadf <- data.frame(sample_data(ps_obj))
+#groups <- factor(c(c(metadf$antibiotics), c(metadf$antibiotics.before.hospitalization)))
+groups <- c('CT', 'who1', 'severe_status', 'Inflammatory.diseases.of.the.bowel', 'Coronary.heart.disease', 'Arterial.hypertension', 'time_point', 'antibiotics', 'antibiotics.before.hospitalization', 'Current.smoking', 'Past.smoking', 'sex', 'age_group', 'Diabetes', 'Obesity', 'Taking.glucocorticoids.biological.therapy', 'Proton_pump_inhibitors')
+for (i in groups){
+  
+  mod <- betadisper(dist, metadf[, i])  
+  permres <- permutest(mod, pairwise = TRUE, permutations = 999)
+  print(i)
+  print(permres)
+}
+#mod 
+#anova(mod)
+```
+```{r}
+library("DESeq2"); packageVersion("DESeq2")
+ps_obj <- ps.mcov
+#write.table(otu_table(ps_obj), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//otu_table_species_level.tsv', quote=FALSE, sep='\t')
+tax_glom_level <- 'Species'
+#tax_glom_level <- 'ASV'
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+
+otu_table(ps_obj) <- otu_table(ps_obj)# + 1
+
+
+agesstat = phyloseq_to_deseq2(ps_obj, ~ severe_status)
+# calculate geometric means prior to estimate size factors
+#gm_mean = function(x, na.rm=TRUE){
+#  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+#}
+#geoMeans = apply(counts(agesstat), 1, gm_mean)
+#agesstat = estimateSizeFactors(agesstat, geoMeans = geoMeans)
+agesstat = DESeq(agesstat, fitType="local", test="Wald", sfType = 'poscounts')
+
+
+res = results(agesstat, independentFiltering = F, contrast=c("severe_status","middle","severe"))
+
+res = res[order(res$padj, na.last=NA), ]
+alpha = 0.05
+sigtab = res[(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(ps.noncontam)[rownames(sigtab), ], "matrix"))
+head(sigtab)
+theme_set(theme_bw())
+
+# Phylum order
+sorted_sigtaben <- sigtab[order(sigtab$log2FoldChange),]
+df <- data.frame(Species = row.names(sorted_sigtaben), log2FoldChange = sorted_sigtaben$log2FoldChange, pvalue = sorted_sigtaben$pvalue)
+
+df$pvalue <- makeStars(df$pvalue)
+df$Satus <- df$log2FoldChange
+#df[df$Satus > 0, ]$Satus <- 'middle'
+df[df$Satus < 0, ]$Satus <- 'severe'
+
+labels <- c()
+
+for (i in df$Species){
+  labels <- append(labels, paste(i, tax_table(ps.noncontam)[i, "Species"]))
+}
+
+df$Species <- labels
+
+ggplot(data=df, aes(y=reorder(Species, log2FoldChange), x=log2FoldChange, fill = Satus)) +
+      #geom_bar(stat="identity")  + 
+      coord_fixed(ratio=2
+                ) + 
+      theme(text = element_text(size = 5)) +
+      geom_col(width = 0.7, position = position_dodge(0.8),color='black' , color='black', size=.5) +
+      geom_text(aes(label = pvalue), vjust = -0.4, position = position_dodge(0.9), size = 2) +  
+      ylab("Species") + theme_bw()
+
+#ggsave('VIZ/DeSeq2_results_tip_glom_001.pdf')
+#ggsave('VIZ/DeSeq2_results_tip_glom_001.png')
+```
+```{r}
+library("DESeq2"); packageVersion("DESeq2")
+ps_obj <- ps.mcov
+#write.table(otu_table(ps_obj), file='/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME/2024_10_08//otu_table_species_level.tsv', quote=FALSE, sep='\t')
+tax_glom_level <- 'ASV'
+
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+otu_table(ps_obj) <- otu_table(ps_obj)# + 1
+
+
+agesstat = phyloseq_to_deseq2(ps_obj, ~ age_group)
+# calculate geometric means prior to estimate size factors
+#gm_mean = function(x, na.rm=TRUE){
+#  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+#}
+#geoMeans = apply(counts(agesstat), 1, gm_mean)
+#agesstat = estimateSizeFactors(agesstat, geoMeans = geoMeans)
+agesstat = DESeq(agesstat, fitType="local", test="Wald", sfType = 'poscounts')
+
+
+res = results(agesstat, independentFiltering = F, contrast=c("age_group","old","noold"))
+
+res = res[order(res$padj, na.last=NA), ]
+alpha = 0.05
+sigtab = res[(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(ps.noncontam)[rownames(sigtab), ], "matrix"))
+head(sigtab)
+theme_set(theme_bw())
+
+# Phylum order
+sorted_sigtaben <- sigtab[order(sigtab$log2FoldChange),]
+df <- data.frame(Species = row.names(sorted_sigtaben), log2FoldChange = sorted_sigtaben$log2FoldChange, pvalue = sorted_sigtaben$pvalue)
+
+df$pvalue <- makeStars(df$pvalue)
+df$Satus <- df$log2FoldChange
+df[df$Satus > 0, ]$Satus <- 'old'
+#df[df$Satus < 0, ]$Satus <- 'noold'
+
+labels <- c()
+
+for (i in df$Species){
+  labels <- append(labels, paste(i, tax_table(ps.noncontam)[i, "Species"]))
+}
+
+df$Species <- labels
+
+ggplot(data=df, aes(y=reorder(Species, log2FoldChange), x=log2FoldChange, fill = Satus)) +
+      #geom_bar(stat="identity")  + 
+      coord_fixed(ratio=2
+                ) + 
+      theme(text = element_text(size = 5)) +
+      geom_col(width = 0.7, position = position_dodge(0.8),color='black' , color='black', size=.5) +
+      geom_text(aes(label = pvalue), vjust = -0.4, position = position_dodge(0.9), size = 2) +  
+      ylab("Species") + theme_bw()
+
+#ggsave('VIZ/DeSeq2_results_tip_glom_001.pdf')
+#ggsave('VIZ/DeSeq2_results_tip_glom_001.png')
+```
+```{r, fig.height=90, fig.width=70}
+
+ps_obj <-  subset_samples(ps.noncontam, Infection.status != "Negative control")
+#rowuse <- rownames(otu_table(ps_obj)[rowSums(otu_table(ps_obj)) > 100,])
+#ps_obj <- prune_samples(rowuse, ps_obj)
+
+print('After specimen selection:')
+#ps_obj
+
+# ==============================================================================
+# Filter taxa
+# prevalence <- 3/nsamples(ps_obj)
+#prevalence <- 1/100
+#prevalence*100
+#detection <- 1
+#taxas <- core_members(ps_obj, detection = detection, prevalence = prevalence)
+#ps_obj <- prune_taxa(taxas, ps_obj)
+
+print('After taxa filtering:')
+#ps_obj
+
+
+# ==============================================================================
+# Agglomeration
+#tax_glom_level <- 'Species'
+#tax_glom_level <- 'Species'
+#if (tax_glom_level != 'ASV'){
+#  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+#}
+
+
+print('After agglomeration:')
+ps_obj
+
+
+# ==============================================================================
+# Transform counts
+transformation <- 'clr'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+
+# ==============================================================================
+# Prepare metadata table
+cols_of_interest <- c('Infection.status', "Time.point", 'Concentration')#colnames(sample_data(ps_obj))
+ps_meta <- as(sample_data(ps_obj), 'data.frame')
+meta_for_heatmap <- ps_meta[, (names(ps_meta) %in% c(cols_of_interest))]
+count_mtrx <- prepare_count_table(ps_obj, taxa_name_func)
+cc <- as.data.frame(count_mtrx)
+
+# Plot Heatmap
+clustering_distance_rows <- 'euclidean'
+clustering_distance_cols <- 'euclidean'
+
+#filename <- paste0('./VIZ/', 'mapped_tip_glom_level_', tip_glom_level, '_transform_', transformation, '_det', detection, '_prev',prevalence, '_clust_dist_cols_', clustering_distance_cols,  '_clust_dist_rows_', clustering_distance_rows, '.pdf')
+filename <- paste0('/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME//VIZ_NEW//', 'mapped_tip_glom_level_', tip_glom_level, '_transform_', transformation, '_det', detection, '_prev',prevalence, '_clust_dist_cols_', clustering_distance_cols,  '_clust_dist_rows_', clustering_distance_rows, '.pdf')
+#filename <- paste0('/mnt/iscsidisk1/runs/runs-krivonos/PROJECTS/MYCOBIOME//VIZ_NEW//', 'mapped_tip_glom_level_', tip_glom_level, '_transform_', transformation, '_det', detection, '_prev',prevalence, '_clust_dist_cols_', clustering_distance_cols,  '_clust_dist_rows_', clustering_distance_rows, '.png')
+p1 <- pheatmap( t(cc), 
+                cluster_rows = T, 
+             #   treeheight_row  = 100, 
+            #    treeheight_col = 100,
+                cluster_cols = T, 
+                annotation_col = meta_for_heatmap,
+                color = viridis(n = 256, alpha = 1, begin = 0, end = 1, option = "viridis"),
+                silent=F,
+                clustering_distance_rows=clustering_distance_rows,
+                clustering_distance_cols=clustering_distance_cols,
+                clustering_method='complete',
+                gaps_col = breaks,
+                show_rownames = T,
+                show_colnames = T, 
+                filename=filename,
+                width=39, height = 25, border_color="grey30"
+                )
+
+
+```
+```{r}
+data_cleared <- subset_samples(ps.noncontam, Time.point != "Healthy")
+ps_obj <- data_cleared
+#transformation <- 'clr'
+#ps_obj <- microbiome::transform(ps_obj, transformation)
+#tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+#if (tax_glom_level != 'ASV'){
+#  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)}
+tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+
+transformation <- 'clr'
+#transformation <- 'compositional'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+
+ps.ord <- ordinate(ps_obj, "PCoA", "euclidean")
+PC1_exp_var <- round(ps.ord$values$Relative_eig[1]*100, 2)
+PC2_exp_var <- round(ps.ord$values$Relative_eig[2]*100, 2)
+p <- plot_ordination(ps_obj, ps.ord, type="samples", color="Time.point", title="Time point")+scale_colour_manual(values = c("Healthy" = "#337357", "Infected (1 point)" = "#EE4266", "Infected (2 point)" = "#FFD23F"))
+p <- p + theme_bw() + theme(text = element_text(size = 10)) + geom_point(size = 1.5)+
+        geom_point(aes(colour = ps_obj), size=1.5, alpha=.1, color='black', shape =1) 
+p <- p + stat_ellipse(level=0.7, size=.3) + theme_bw() +# coord_fixed(ratio=1/1)+
+  theme(plot.title = element_text(hjust = 0.5))+
+       theme(text = element_text(size = 14))+ 
+       guides(color = guide_legend(title = "Group"))+ 
+     theme(text = element_text(size = 7), legend.position="right", 
+           legend.text=element_text(size=5),
+           legend.box.background = element_rect(colour = "black"))+ 
+  theme(aspect.ratio = 1/1)+
+    xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    ylab(paste("PC2 [", PC2_exp_var, "%]", sep='')) #+  scale_color_manual(values =c("#999999", "#F8AE10"))
+df <- data.frame(ps.ord$vectors[, c('Axis.1', 'Axis.2')])
+df$class <- sample_data(ps_obj)$Time.point
+colnames(df) <- c('x', 'y', 'class')
+centroids <- aggregate(cbind(x,y)~class,df,mean)
+
+pc1_bp <- ggplot(df, aes(x=x, y=class, color=class))+scale_colour_manual(values = c("Healthy" = "#337357", "Infected (1 point)" = "#EE4266", "Infected (2 point)" = "#FFD23F"))+geom_violin(trim=TRUE)+ 
+             #   geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+               # coord_fixed(ratio=1/1)+
+                geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                    map_signif_level = TRUE, textsize=2, y_position =max(df$x)+2)+
+                geom_jitter(size = .5, alpha = 0.5)+
+                geom_signif(comparisons = list(c("Healthy", "Infected (1 point)")),
+                    map_signif_level = TRUE, textsize=2)+
+                geom_signif(comparisons = list(c("Infected (1 point)", "Infected (2 point)")),
+                    map_signif_level = TRUE, textsize=2, aspect.ratio = .3/1)+ theme(legend.position="none", axis.title.y=element_blank())+
+                xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+
+
+pc2_bp <- ggplot(df, aes(y=y, x=class, color=class))+scale_colour_manual(values = c("Healthy" = "#337357", "Infected (1 point)" = "#EE4266", "Infected (2 point)" = "#FFD23F"))+ geom_violin(trim=TRUE)+
+            #    geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+                #coord_fixed(ratio=1/1)+
+                geom_jitter(size = .5, alpha = 0.5)+
+                geom_signif(comparisons = list(c("Healthy", "Infected (1 point)")),
+                       map_signif_level = TRUE, textsize=2)+
+                geom_signif(comparisons = list(c("Infected (1 point)", "Infected (2 point)")),
+                       map_signif_level = TRUE, textsize=2)+
+                geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                       map_signif_level = TRUE, textsize=2, y_position =max(df$y)+2)+
+                #geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                 #      map_signif_level = TRUE, textsize=2)+
+                theme(axis.text.x = element_text(angle=90), aspect.ratio = 1/0.3)+ theme(legend.position="none", axis.title.x=element_blank())+
+                ylab(paste("PC2 [", PC2_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+library(patchwork)
+
+pc2_bp + p + guide_area()+ pc1_bp + plot_layout(guides='keep')
+ggsave('VIZ_NEW//PCoA_atch.pdf')
+ggsave('VIZ_NEW//PCoA_atch.png', dpi=800)
+```
+```{r}
+data_cleared <- subset_samples(ps.noncontam, Time.point != "Healthy")
+ps_obj <- data_cleared
+#transformation <- 'clr'
+#ps_obj <- microbiome::transform(ps_obj, transformation)
+#tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+#if (tax_glom_level != 'ASV'){
+#  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)}
+tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+#transformation <- 'clr'
+transformation <- 'compositional'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+
+ps.ord <- ordinate(ps_obj, "PCoA", "bray")
+PC1_exp_var <- round(ps.ord$values$Relative_eig[1]*100, 2)
+PC2_exp_var <- round(ps.ord$values$Relative_eig[2]*100, 2)
+p <- plot_ordination(ps_obj, ps.ord, type="samples", color="Time.point", title="Time point")+scale_colour_manual(values = c("Healthy" = "#337357", "Infected (1 point)" = "#EE4266", "Infected (2 point)" = "#FFD23F"))
+p <- p + theme_bw() + theme(text = element_text(size = 10)) + geom_point(size = 1.5)+
+        geom_point(aes(colour = ps_obj), size=1.5, alpha=.1, color='black', shape =1) 
+p <- p + stat_ellipse(level=0.7, size=.3) + theme_bw() +# coord_fixed(ratio=1/1)+
+  theme(plot.title = element_text(hjust = 0.5))+
+       theme(text = element_text(size = 14))+ 
+       guides(color = guide_legend(title = "Group"))+ 
+     theme(text = element_text(size = 7), legend.position="right", 
+           legend.text=element_text(size=5),
+           legend.box.background = element_rect(colour = "black"))+ 
+  theme(aspect.ratio = 1/1)+
+    xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    ylab(paste("PC2 [", PC2_exp_var, "%]", sep='')) #+  scale_color_manual(values =c("#999999", "#F8AE10"))
+df <- data.frame(ps.ord$vectors[, c('Axis.1', 'Axis.2')])
+df$class <- sample_data(ps_obj)$Time.point
+colnames(df) <- c('x', 'y', 'class')
+centroids <- aggregate(cbind(x,y)~class,df,mean)
+
+pc1_bp <- ggplot(df, aes(x=x, y=class, color=class))+scale_colour_manual(values = c("Healthy" = "#337357", "Infected (1 point)" = "#EE4266", "Infected (2 point)" = "#FFD23F"))+geom_violin(trim=TRUE)+ 
+             #   geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+               # coord_fixed(ratio=1/1)+
+                geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                    map_signif_level = TRUE, textsize=2, y_position =max(df$x)+.1)+
+                geom_jitter(size = .5, alpha = 0.5)+
+                geom_signif(comparisons = list(c("Healthy", "Infected (1 point)")),
+                    map_signif_level = TRUE, textsize=2)+
+                geom_signif(comparisons = list(c("Infected (1 point)", "Infected (2 point)")),
+                    map_signif_level = TRUE, textsize=2, aspect.ratio = .3/1)+ theme(legend.position="none", axis.title.y=element_blank())+
+                xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+
+
+pc2_bp <- ggplot(df, aes(y=y, x=class, color=class))+scale_colour_manual(values = c("Healthy" = "#337357", "Infected (1 point)" = "#EE4266", "Infected (2 point)" = "#FFD23F"))+ geom_violin(trim=TRUE)+
+            #    geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+                #coord_fixed(ratio=1/1)+
+                geom_jitter(size = .5, alpha = 0.5)+
+                geom_signif(comparisons = list(c("Healthy", "Infected (1 point)")),
+                       map_signif_level = TRUE, textsize=2)+
+                geom_signif(comparisons = list(c("Infected (1 point)", "Infected (2 point)")),
+                       map_signif_level = TRUE, textsize=2)+
+                geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                       map_signif_level = TRUE, textsize=2, y_position =max(df$y)+.1)+
+                #geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                 #      map_signif_level = TRUE, textsize=2)+
+                theme(axis.text.x = element_text(angle=90), aspect.ratio = 1/0.3)+ theme(legend.position="none", axis.title.x=element_blank())+
+                ylab(paste("PC2 [", PC2_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+library(patchwork)
+
+pc2_bp + p + guide_area()+ pc1_bp + plot_layout(guides='keep')
+ggsave('VIZ_NEW//PCoA_bray.pdf')
+ggsave('VIZ_NEW//PCoA_bray.png', dpi=800)
+```
+```{r}
+data_cleared <- ps.mcov#subset_samples(ps.mcov, Time.point != "Healthy")
+ps_obj <- data_cleared
+#transformation <- 'clr'
+#ps_obj <- microbiome::transform(ps_obj, transformation)
+#tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+#if (tax_glom_level != 'ASV'){
+#  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)}
+tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+
+transformation <- 'clr'
+#transformation <- 'compositional'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+
+ps.ord <- ordinate(ps_obj, "PCoA", "euclidean")
+PC1_exp_var <- round(ps.ord$values$Relative_eig[1]*100, 2)
+PC2_exp_var <- round(ps.ord$values$Relative_eig[2]*100, 2)
+p <- plot_ordination(ps_obj, ps.ord, type="samples", color="severe_status", title="Severe status")+scale_colour_manual(values = c( "middle" = "#EE4266", "severe" = "#FFD23F"))
+p <- p + theme_bw() + theme(text = element_text(size = 10)) + geom_point(size = 1.5)+
+        geom_point(aes(colour = ps_obj), size=1.5, alpha=.1, color='black', shape =1) 
+p <- p + stat_ellipse(level=0.7, size=.3) + theme_bw() +# coord_fixed(ratio=1/1)+
+  theme(plot.title = element_text(hjust = 0.5))+
+       theme(text = element_text(size = 14))+ 
+       guides(color = guide_legend(title = "Group"))+ 
+     theme(text = element_text(size = 7), legend.position="right", 
+           legend.text=element_text(size=5),
+           legend.box.background = element_rect(colour = "black"))+ 
+  theme(aspect.ratio = 1/1)+
+    xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    ylab(paste("PC2 [", PC2_exp_var, "%]", sep='')) #+  scale_color_manual(values =c("#999999", "#F8AE10"))
+df <- data.frame(ps.ord$vectors[, c('Axis.1', 'Axis.2')])
+df$class <- sample_data(ps_obj)$severe_status
+colnames(df) <- c('x', 'y', 'class')
+centroids <- aggregate(cbind(x,y)~class,df,mean)
+
+pc1_bp <- ggplot(df, aes(x=x, y=class, color=class))+scale_colour_manual(values = c("middle" = "#EE4266", "severe" = "#FFD23F"))+geom_violin(trim=TRUE)+ 
+             #   geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+               # coord_fixed(ratio=1/1)+
+                geom_signif(comparisons = list(c("middle", "severe")),
+                    map_signif_level = TRUE, textsize=2, y_position =max(df$x)+2)+
+                geom_jitter(size = .5, alpha = 0.5)+
+               # geom_signif(comparisons = list(c("middle", "severe")),
+              #      map_signif_level = TRUE, textsize=2)+
+             #   geom_signif(comparisons = list(c("middle", "severe")),
+            #        map_signif_level = TRUE, textsize=2, aspect.ratio = .3/1)
+  theme(legend.position="none", axis.title.y=element_blank())+
+                xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+
+
+pc2_bp <- ggplot(df, aes(y=y, x=class, color=class))+scale_colour_manual(values = c("middle" = "#EE4266", "severe" = "#FFD23F"))+ geom_violin(trim=TRUE)+
+            #    geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+                #coord_fixed(ratio=1/1)+
+                geom_jitter(size = .5, alpha = 0.5)+
+                geom_signif(comparisons = list(c("middle", "severe")),
+                       map_signif_level = TRUE, textsize=2)+
+             #   geom_signif(comparisons = list(c("middle", "severe")),
+            #           map_signif_level = TRUE, textsize=2)+
+             #   geom_signif(comparisons = list(c("middle", "severe")),
+              #         map_signif_level = TRUE, textsize=2, y_position =max(df$y)+2)+
+                #geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                 #      map_signif_level = TRUE, textsize=2)+
+                theme(axis.text.x = element_text(angle=90), aspect.ratio = 1/0.3)+ theme(legend.position="none", axis.title.x=element_blank())+
+                ylab(paste("PC2 [", PC2_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+library(patchwork)
+
+pc2_bp + p + guide_area()+ pc1_bp + plot_layout(guides='keep')
+ggsave('VIZ_NEW//PCoA_atch_mid_sev.pdf')
+ggsave('VIZ_NEW//PCoA_atch_mid_sev.png', dpi=800)
+```
+```{r}
+data_cleared <- ps.mcov#subset_samples(ps.mcov, Time.point != "Healthy")
+ps_obj <- data_cleared
+#transformation <- 'clr'
+#ps_obj <- microbiome::transform(ps_obj, transformation)
+#tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+#if (tax_glom_level != 'ASV'){
+#  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)}
+tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+
+#transformation <- 'clr'
+transformation <- 'compositional'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+
+ps.ord <- ordinate(ps_obj, "PCoA", "bray")
+PC1_exp_var <- round(ps.ord$values$Relative_eig[1]*100, 2)
+PC2_exp_var <- round(ps.ord$values$Relative_eig[2]*100, 2)
+p <- plot_ordination(ps_obj, ps.ord, type="samples", color="severe_status", title="Severe status")+scale_colour_manual(values = c( "middle" = "#EE4266", "severe" = "#FFD23F"))
+p <- p + theme_bw() + theme(text = element_text(size = 10)) + geom_point(size = 1.5)+
+        geom_point(aes(colour = ps_obj), size=1.5, alpha=.1, color='black', shape =1) 
+p <- p + stat_ellipse(level=0.7, size=.3) + theme_bw() +# coord_fixed(ratio=1/1)+
+  theme(plot.title = element_text(hjust = 0.5))+
+       theme(text = element_text(size = 14))+ 
+       guides(color = guide_legend(title = "Group"))+ 
+     theme(text = element_text(size = 7), legend.position="right", 
+           legend.text=element_text(size=5),
+           legend.box.background = element_rect(colour = "black"))+ 
+  theme(aspect.ratio = 1/1)+
+    xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    ylab(paste("PC2 [", PC2_exp_var, "%]", sep='')) #+  scale_color_manual(values =c("#999999", "#F8AE10"))
+p
+df <- data.frame(ps.ord$vectors[, c('Axis.1', 'Axis.2')])
+df$class <- sample_data(ps_obj)$severe_status
+colnames(df) <- c('x', 'y', 'class')
+centroids <- aggregate(cbind(x,y)~class,df,mean)
+
+pc1_bp <- ggplot(df, aes(x=x, y=class, color=class))+scale_colour_manual(values = c("middle" = "#EE4266", "severe" = "#FFD23F"))+geom_violin(trim=TRUE)+ 
+             #   geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+               # coord_fixed(ratio=1/1)+
+                geom_signif(comparisons = list(c("middle", "severe")),
+                    map_signif_level = TRUE, textsize=2, y_position =max(df$x)+0.05)+
+                geom_jitter(size = .5, alpha = 0.5)+
+               # geom_signif(comparisons = list(c("middle", "severe")),
+              #      map_signif_level = TRUE, textsize=2)+
+             #   geom_signif(comparisons = list(c("middle", "severe")),
+            #        map_signif_level = TRUE, textsize=2, aspect.ratio = .3/1)+ 
+  theme(legend.position="none", axis.title.y=element_blank())+
+                xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+
+
+pc2_bp <- ggplot(df, aes(y=y, x=class, color=class))+scale_colour_manual(values = c("middle" = "#EE4266", "severe" = "#FFD23F"))+ geom_violin(trim=TRUE)+
+            #    geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+                #coord_fixed(ratio=1/1)+
+                geom_jitter(size = .5, alpha = 0.5)+
+                geom_signif(comparisons = list(c("middle", "severe")),
+                       map_signif_level = TRUE, textsize=2)+
+             #   geom_signif(comparisons = list(c("middle", "severe")),
+            #           map_signif_level = TRUE, textsize=2)+
+             #   geom_signif(comparisons = list(c("middle", "severe")),
+              #         map_signif_level = TRUE, textsize=2, y_position =max(df$y)+2)+
+                #geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                 #      map_signif_level = TRUE, textsize=2)+
+                theme(axis.text.x = element_text(angle=90), aspect.ratio = 1/0.3)+ theme(legend.position="none", axis.title.x=element_blank())+
+                ylab(paste("PC2 [", PC2_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+library(patchwork)
+
+pc2_bp + p + guide_area()+ pc1_bp + plot_layout(guides='keep')
+ggsave('VIZ_NEW//PCoA_bray_mid_sev.pdf')
+ggsave('VIZ_NEW//PCoA_bray_mid_sev.png', dpi=800)
+```
+```{r}
+data_cleared <- ps.mcov#subset_samples(ps.mcov, Time.point != "Healthy")
+ps_obj <- data_cleared
+#transformation <- 'clr'
+#ps_obj <- microbiome::transform(ps_obj, transformation)
+#tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+#if (tax_glom_level != 'ASV'){
+#  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)}
+tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+
+#transformation <- 'clr'
+transformation <- 'compositional'
+ps_obj <- microbiome::transform(ps_obj, transformation)
+
+ps.ord <- ordinate(ps_obj, "PCoA", "bray")
+PC1_exp_var <- round(ps.ord$values$Relative_eig[1]*100, 2)
+PC2_exp_var <- round(ps.ord$values$Relative_eig[2]*100, 2)
+p <- plot_ordination(ps_obj, ps.ord, type="samples", color="CT", title="Severe status")#+scale_colour_manual(values = c( "middle" = "#EE4266", "severe" = "#FFD23F"))
+p <- p + theme_bw() + theme(text = element_text(size = 10)) + geom_point(size = 1.5)+
+        geom_point(aes(colour = ps_obj), size=1.5, alpha=.1, color='black', shape =1) 
+p <- p + stat_ellipse(level=0.7, size=.3) + theme_bw() +# coord_fixed(ratio=1/1)+
+  theme(plot.title = element_text(hjust = 0.5))+
+       theme(text = element_text(size = 14))+ 
+       guides(color = guide_legend(title = "Group"))+ 
+     theme(text = element_text(size = 7), legend.position="right", 
+           legend.text=element_text(size=5),
+           legend.box.background = element_rect(colour = "black"))+ 
+  theme(aspect.ratio = 1/1)+
+    xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    ylab(paste("PC2 [", PC2_exp_var, "%]", sep='')) #+  scale_color_manual(values =c("#999999", "#F8AE10"))
+p
+df <- data.frame(ps.ord$vectors[, c('Axis.1', 'Axis.2')])
+df$class <- sample_data(ps_obj)$CT
+colnames(df) <- c('x', 'y', 'class')
+centroids <- aggregate(cbind(x,y)~class,df,mean)
+
+pc1_bp <- ggplot(df, aes(x=x, y=class, color=class))+scale_colour_manual(values = c("middle" = "#EE4266", "severe" = "#FFD23F"))+geom_violin(trim=TRUE)+ 
+             #   geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+               # coord_fixed(ratio=1/1)+
+                geom_signif(comparisons = list(c("middle", "severe")),
+                    map_signif_level = TRUE, textsize=2, y_position =max(df$x)+0.05)+
+                geom_jitter(size = .5, alpha = 0.5)+
+               # geom_signif(comparisons = list(c("middle", "severe")),
+              #      map_signif_level = TRUE, textsize=2)+
+             #   geom_signif(comparisons = list(c("middle", "severe")),
+            #        map_signif_level = TRUE, textsize=2, aspect.ratio = .3/1)+ theme(legend.position="none", axis.title.y=element_blank())+
+                xlab(paste("PC1 [", PC1_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+
+
+pc2_bp <- ggplot(df, aes(y=y, x=class, color=class))+
+#scale_colour_manual(values = c("middle" = "#EE4266", "severe" = "#FFD23F"))+
+geom_violin(trim=TRUE)+
+            #    geom_boxplot(outlier.size=.5)+ 
+                theme_bw()+ 
+                #coord_fixed(ratio=1/1)+
+                geom_jitter(size = .5, alpha = 0.5)+
+                geom_signif(comparisons = list(c("CT1", "CT2")),
+                       map_signif_level = TRUE, textsize=2)+
+                geom_signif(comparisons = list(c("CT2", "CT3")),
+                       map_signif_level = TRUE, textsize=2)+
+             #   geom_signif(comparisons = list(c("middle", "severe")),
+              #         map_signif_level = TRUE, textsize=2, y_position =max(df$y)+2)+
+                #geom_signif(comparisons = list(c("Healthy", "Infected (2 point)")),
+                 #      map_signif_level = TRUE, textsize=2)+
+                theme(axis.text.x = element_text(angle=90), aspect.ratio = 1/0.3)+ theme(legend.position="none", axis.title.x=element_blank())+
+                ylab(paste("PC2 [", PC2_exp_var, "%]", sep=''))+
+    theme(text = element_text(size = 8))
+library(patchwork)
+
+pc2_bp + p + guide_area()+ pc1_bp + plot_layout(guides='keep')
+#ggsave('VIZ_NEW//PCoA_bray_mid_sev.pdf')
+#ggsave('VIZ_NEW//PCoA_bray_mid_sev.png', dpi=800)
+```
+#NetCoMi
+```{r}
+library(NetCoMi)
+
+ps_obj <- ps.noncontam
+
+tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+
+taxa_name_func <- function(x) {paste0(x['ASV'], '__', gsub('/', '', gsub("-", "", x['Genus'])),'__', x['Species'])}
+count_mtrx <- prepare_count_table(ps_obj, taxa_name_func)
+#otu_table(ps_obj) <- count_mtrx
+
+
+net_spring <- netConstruct(count_mtrx,
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 50),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 1000),
+                           measure = "spring",
+                           measurePar = list(nlambda=10, 
+                                             rep.num=10,
+                                             Rmethod = "approx"),
+                           normMethod = "none", 
+                           zeroMethod = "none",
+                           sparsMethod = "none", 
+                           dissFunc = "signed",
+                           verbose = 2,
+                           seed = 123456)
+```
+```{r}
+
+props_spring <- netAnalyze(net_spring, 
+                           centrLCC = TRUE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = "eigenvector",
+                           weightDeg = FALSE, normDeg = FALSE)
+
+```
+
+```{r}
+p <- plot(props_spring, 
+          layout='spring',
+          nodeColor = "cluster", 
+          nodeSize = "normCounts",
+          nodeSizeSpread=5,
+          rmSingles = TRUE,
+          cexLabels = .25,
+          hubBorderCol = "darkgray",
+          labelScale=FALSE
+          ,
+        #  title1 = "Network on ASV level with SPRING associations", 
+        #fontsize=1,
+        #edgeFilter=0.6,
+       #   filename='VIZ_NEW/Net_viz_sp',
+      #    filetype='png'
+          ) 
+
+#legend(0.6, 1.1, cex = .6, title = "estimated association:",
+#       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"), 
+#       bty = "n", horiz = TRUE)
+#png(filename="VIZ_NEW/Net_viz.pdf.png")
+
+#qgraph('Net_viz.pdf',filetype='pdf',height=5,width=10)
+
+```
+```{r}
+edges <- dplyr::select(net_spring$edgelist1, v1, v2)
+
+# Add Source and Target variables (as IDs)
+edges$Source <- as.numeric(factor(edges$v1))
+edges$Target <- as.numeric(factor(edges$v2))
+edges$Type <- "Undirected"
+edges$Weight <- net_spring$edgelist1$adja
+
+nodes <- unique(edges[,c('v1','Source')])
+colnames(nodes) <- c("Label", "Id")
+
+# Add category with clusters (can be used as node colors in Gephi)
+nodes$Category <- props_spring$clustering$clust1[nodes$Label]
+
+edges <- dplyr::select(edges, Source, Target, Type, Weight)
+
+write.csv(nodes, file = "nodes.csv", row.names = FALSE)
+write.csv(edges, file = "edges.csv", row.names = FALSE)
+```
+
+```{r}
+library(lme4)
+
+ps_obj <- ps.noncontam
+tax_glom_level <- 'Species'
+#tax_glom_level <- 'Genus'
+if (tax_glom_level != 'ASV'){
+  ps_obj <- speedyseq::tax_glom(ps_obj, tax_glom_level, NArm = F)
+}
+#tip_glom_level <- 0.1
+
+#ps_obj <- tip_glom(ps_obj, h=tip_glom_level)
+
+#taxa_name_func <- function(x) {paste0(x['ASV'], '__', gsub('/', '', gsub("-", "", x['Genus'])),'__', x['Species'])}
+#count_mtrx <- prepare_count_table(ps_obj, taxa_name_func)
+
+net_pears <- netConstruct(ps_obj,  
+                          measure = "pearson",
+                          normMethod = "clr",
+                         # zeroMethod = "multRepl",
+                          sparsMethod = "threshold",
+                          thresh = 0.7,
+                          verbose = 3)
+
+
+```
+```{r}
+props_pears <- netAnalyze(net_pears, 
+                          clustMethod = "cluster_fast_greedy")
+
+```
+```{r}
+plot(props_pears, 
+     nodeColor = "cluster", 
+     nodeSize = "eigenvector",
+     repulsion = 0.8,
+     rmSingles = TRUE,
+     labelScale = FALSE,
+   #  cexLabels = 1,
+     nodeSizeSpread = 3,
+     cexLabels = .25,
+     cexNodes = 2,
+  #   hubBorderCol = "darkgray",
+  #   title1 = "Network on OTU level with Pearson correlations", 
+    # showTitle = TRUE,
+     cexTitle = 2.3,
+     filename='VIZ_NEW/Net_viz_corr_sp_lev',
+      filetype='pdf')
+
+#legend(0.7, 1.1, cex = 2.2, title = "estimated correlation:",
+#       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"),
+#       bty = "n", horiz = TRUE)
+#ggsave('VIZ_NEW/NetCoMi_res.pdf')
+```
